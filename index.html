@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>MyMoney</title>
   <link rel="stylesheet" href="https://cdn-uicons.flaticon.com/uicons-regular-rounded/css/uicons-regular-rounded.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
   <style>
     * { box-sizing: border-box; }
@@ -599,22 +600,20 @@
 <body>
   <a href="#app" class="skip-link">Skip to content</a>
 
-  <!-- =================== LOGIN =================== -->
+  <!-- =================== SECURE LOGIN =================== -->
   <section id="login-screen" class="login-screen">
     <form id="login-form" class="login-card" aria-labelledby="login-title">
       <h1 id="login-title"><i class="fi fi-rr-wallet icon" aria-hidden="true"></i>MyMoney</h1>
-      <p class="muted">Welcome, Jojo. Enter your password.</p>
-
+      <p class="muted">Sign in to your private account. Your data syncs securely across your devices.</p>
+      <label for="login-email">Email</label>
+      <input id="login-email" type="email" required autocomplete="username" aria-describedby="login-error">
       <label for="login-password">Password</label>
-      <input id="login-password" type="password" required autocomplete="current-password" aria-describedby="login-error">
-
+      <input id="login-password" type="password" required autocomplete="current-password">
       <p id="login-error" class="error" role="alert" aria-live="polite"></p>
-      <button class="button" type="submit" style="width:100%">
-        <i class="fi fi-rr-sign-in-alt icon" aria-hidden="true"></i>Log in
+      <button id="login-submit" class="button" type="submit" style="width:100%">
+        <i class="fi fi-rr-sign-in-alt icon" aria-hidden="true"></i>Sign in
       </button>
-      <p class="muted" style="font-size:12px; margin-top:18px">
-        Demo password: <code>jojo123</code> — change it in Settings after login.
-      </p>
+      <p class="muted" style="font-size:12px; margin-top:18px">Private account sign-in only. Account creation is disabled.</p>
     </form>
   </section>
 
@@ -662,7 +661,7 @@
         <header class="topbar">
           <div>
             <h1 id="dashboard-h"><i class="fi fi-rr-home icon" aria-hidden="true"></i>Dashboard</h1>
-            <p class="muted">Your money at a glance</p>
+            <p class="muted">Your money at a glance · Cloud synced</p>
           </div>
         </header>
 
@@ -859,12 +858,12 @@
           <h2><i class="fi fi-rr-lock icon" aria-hidden="true"></i>Security</h2>
           <div class="settings-row">
             <div>
-              <div>Change password</div>
-              <div class="desc">Stored locally on this device only. Not secure against anyone with browser access.</div>
+              <div>Change account password</div>
+              <div class="desc">Your password is managed securely by Supabase Authentication.</div>
             </div>
             <div style="display:flex; flex-direction:column; gap:8px; min-width:200px">
-              <input id="setting-new-password" type="password" placeholder="New password" autocomplete="new-password">
-              <button id="setting-save-password" class="button" type="button">Save password</button>
+              <input id="setting-new-password" type="password" placeholder="New password (12+ chars)" autocomplete="new-password" minlength="12">
+              <button id="setting-save-password" class="button" type="button">Update password</button>
             </div>
           </div>
         </section>
@@ -889,7 +888,7 @@
 
         <div class="danger-zone">
           <h3><i class="fi fi-rr-triangle-warning icon" aria-hidden="true"></i>Danger zone</h3>
-          <p class="muted" style="font-size:13px; margin-top:0">Master reset permanently deletes all transactions, budgets, and settings from this browser.</p>
+          <p class="muted" style="font-size:13px; margin-top:0">Master reset deletes your cloud transactions, budgets, and preferences for this account.</p>
           <button id="setting-master-reset" class="button reset" type="button" style="width:auto">
             <i class="fi fi-rr-trash icon" aria-hidden="true"></i>Master reset everything
           </button>
@@ -994,74 +993,111 @@
   <script>
     "use strict";
 
-    /* ================== Constants & state ================== */
-    const DEFAULT_PASSWORD = "jojo123";
+    /* ================== Supabase setup ================== */
+    // Paste your Supabase Project URL and anon/public key here.
+    // Never put a service_role key in this public website.
+    const SUPABASE_URL = "YOUR_SUPABASE_PROJECT_URL";
+    const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_PUBLIC_KEY";
+    const supabaseConfigured = !SUPABASE_URL.startsWith("YOUR_") && !SUPABASE_ANON_KEY.startsWith("YOUR_");
+    const supabaseClient = supabaseConfigured ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+    }) : null;
+
     const STORAGE_KEYS = {
       transactions: "inr-money-manager-transactions",
-      budgets:      "inr-money-manager-budgets",
-      settings:     "inr-money-manager-settings",
-      session:      "inr-money-manager-logged-in"
+      budgets: "inr-money-manager-budgets",
+      settings: "inr-money-manager-settings"
     };
-
     const CATEGORIES = ["Food","Transport","Shopping","Bills","Health","Entertainment","Salary","Other"];
-
     const settings = loadSettings();
-    const charts = {}; // cached Chart.js instances
+    const charts = {};
+    let activeUser = null;
+    let cloudReady = false;
+    let cloudSaveTimer = null;
+    let cloudSaveChain = Promise.resolve();
+    let cloudChannel = null;
 
-    /* ================== Persistence ================== */
+    /* ================== Persistence / local cache ================== */
     function safeParse(raw, fallback) {
-      try { return JSON.parse(raw); }
-      catch { return fallback; }
+      try { return JSON.parse(raw); } catch { return fallback; }
     }
-
     function loadTransactions() {
       const arr = safeParse(localStorage.getItem(STORAGE_KEYS.transactions) || "[]", []);
       if (!Array.isArray(arr)) return [];
-      // Validate each item shape; drop anything malformed.
       return arr.filter(isValidTransaction);
     }
-
     function isValidTransaction(item) {
       if (!item || typeof item !== "object") return false;
-      if (typeof item.id !== "string") return false;
-      if (typeof item.description !== "string") return false;
+      if (typeof item.id !== "string" || typeof item.description !== "string") return false;
       if (typeof item.amount !== "number" || !Number.isFinite(item.amount) || item.amount <= 0) return false;
       if (item.type !== "income" && item.type !== "expense") return false;
       if (typeof item.category !== "string") return false;
       if (typeof item.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(item.date)) return false;
       return true;
     }
-
     function saveTransactions(items) {
       localStorage.setItem(STORAGE_KEYS.transactions, JSON.stringify(items));
+      scheduleCloudSave();
     }
-
     function loadBudgets() {
       const obj = safeParse(localStorage.getItem(STORAGE_KEYS.budgets) || "{}", {});
       const cleaned = {};
-      if (obj && typeof obj === "object") {
-        for (const [k, v] of Object.entries(obj)) {
-          if (typeof v === "number" && v > 0) cleaned[k] = v;
-        }
-      }
+      if (obj && typeof obj === "object") for (const [k, v] of Object.entries(obj)) if (typeof v === "number" && v > 0) cleaned[k] = v;
       return cleaned;
     }
-
     function saveBudgets(obj) {
       localStorage.setItem(STORAGE_KEYS.budgets, JSON.stringify(obj));
+      scheduleCloudSave();
     }
-
     function loadSettings() {
       const obj = safeParse(localStorage.getItem(STORAGE_KEYS.settings) || "{}", {});
       return {
         currency: typeof obj.currency === "string" ? obj.currency : "INR",
-        theme:    obj.theme === "dark" || obj.theme === "light" || obj.theme === "system" ? obj.theme : "light",
-        password: typeof obj.password === "string" && obj.password ? obj.password : DEFAULT_PASSWORD
+        theme: obj.theme === "dark" || obj.theme === "light" || obj.theme === "system" ? obj.theme : "light"
       };
     }
-
     function saveSettings() {
       localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings));
+      scheduleCloudSave();
+    }
+    function snapshotData() {
+      return { transactions: loadTransactions(), budgets: loadBudgets(), settings: { currency: settings.currency, theme: settings.theme } };
+    }
+    function applyCloudData(data) {
+      const safe = data && typeof data === "object" ? data : {};
+      localStorage.setItem(STORAGE_KEYS.transactions, JSON.stringify(Array.isArray(safe.transactions) ? safe.transactions.filter(isValidTransaction) : []));
+      localStorage.setItem(STORAGE_KEYS.budgets, JSON.stringify(safe.budgets && typeof safe.budgets === "object" ? safe.budgets : {}));
+      const cloudSettings = safe.settings && typeof safe.settings === "object" ? safe.settings : {};
+      settings.currency = typeof cloudSettings.currency === "string" ? cloudSettings.currency : "INR";
+      settings.theme = ["light","dark","system"].includes(cloudSettings.theme) ? cloudSettings.theme : "light";
+      localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify({ currency: settings.currency, theme: settings.theme }));
+    }
+    async function loadCloudDataAndSync() {
+      const { data, error } = await supabaseClient.from("mymoney_data").select("data").eq("user_id", activeUser.id).maybeSingle();
+      if (error) throw error;
+      if (data && data.data) {
+        applyCloudData(data.data);
+      } else {
+        // First sign-in: preserve and migrate any existing browser-only records.
+        await writeCloudSnapshot(snapshotData());
+      }
+      cloudReady = true;
+    }
+    async function writeCloudSnapshot(snapshot) {
+      if (!activeUser) return;
+      const { error } = await supabaseClient.from("mymoney_data").upsert({ user_id: activeUser.id, data: snapshot, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+      if (error) throw error;
+    }
+    function scheduleCloudSave() {
+      if (!activeUser || !cloudReady) return;
+      clearTimeout(cloudSaveTimer);
+      cloudSaveTimer = setTimeout(() => {
+        const snapshot = snapshotData();
+        cloudSaveChain = cloudSaveChain.then(() => writeCloudSnapshot(snapshot)).catch(error => {
+          console.error("Cloud sync failed:", error);
+          toast("Cloud sync failed. Check your connection and try again.", "error");
+        });
+      }, 500);
     }
 
     /* ================== Formatting ================== */
@@ -1130,40 +1166,75 @@
       }, 2400);
     }
 
-    /* ================== Auth ================== */
+    /* ================== Supabase authentication ================== */
     const loginScreen = document.getElementById("login-screen");
     const app = document.getElementById("app");
-
     function setLoggedIn(isLoggedIn) {
       loginScreen.classList.toggle("hidden", isLoggedIn);
       app.classList.toggle("hidden", !isLoggedIn);
-      sessionStorage.setItem(STORAGE_KEYS.session, isLoggedIn ? "yes" : "no");
       if (isLoggedIn) {
         runRecurringIfNeeded();
         render();
       }
     }
-
-    function logout() {
-      const dialog = document.getElementById("transaction-dialog");
-      if (dialog.open) dialog.close();
-      const bdialog = document.getElementById("budget-dialog");
-      if (bdialog.open) bdialog.close();
+    function startRealtimeSync() {
+      if (!activeUser || !supabaseClient) return;
+      if (cloudChannel) supabaseClient.removeChannel(cloudChannel);
+      cloudChannel = supabaseClient.channel("mymoney-sync-" + activeUser.id)
+        .on("postgres_changes", { event: "*", schema: "public", table: "mymoney_data", filter: "user_id=eq." + activeUser.id }, payload => {
+          if (payload.eventType === "DELETE") { applyCloudData({ transactions: [], budgets: {}, settings: { currency: "INR", theme: "light" } }); }
+          else if (payload.new && payload.new.data) applyCloudData(payload.new.data);
+          applyTheme();
+          document.getElementById("setting-currency").value = settings.currency;
+          document.getElementById("setting-theme").value = settings.theme;
+          render();
+        }).subscribe();
+    }
+    async function logout() {
+      clearTimeout(cloudSaveTimer);
+      // Flush any recent edits before clearing this device's cache and signing out.
+      try {
+        if (activeUser && cloudReady) await writeCloudSnapshot(snapshotData());
+        await cloudSaveChain;
+      } catch (e) {
+        toast("Some recent changes may not have synced. Please check your connection.", "error");
+        console.error(e);
+      }
+      cloudReady = false;
+      activeUser = null;
+      if (cloudChannel) { await supabaseClient.removeChannel(cloudChannel); cloudChannel = null; }
+      const { error } = await supabaseClient.auth.signOut();
+      if (error) toast("Sign out failed: " + error.message, "error");
+      for (const key of Object.values(STORAGE_KEYS)) localStorage.removeItem(key);
       setLoggedIn(false);
     }
-
-    document.getElementById("login-form").addEventListener("submit", event => {
+    document.getElementById("login-form").addEventListener("submit", async event => {
       event.preventDefault();
+      const submit = document.getElementById("login-submit");
+      const errorEl = document.getElementById("login-error");
+      submit.disabled = true;
+      errorEl.textContent = "";
+      const email = document.getElementById("login-email").value.trim();
       const password = document.getElementById("login-password").value;
-      if (password === settings.password) {
-        document.getElementById("login-error").textContent = "";
+      const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+      submit.disabled = false;
+      if (error) { errorEl.textContent = "Sign in failed. Check your email and password."; return; }
+      activeUser = data.user;
+      try {
+        await loadCloudDataAndSync();
         event.target.reset();
+        applyTheme();
+        document.getElementById("setting-currency").value = settings.currency;
+        document.getElementById("setting-theme").value = settings.theme;
         setLoggedIn(true);
-      } else {
-        document.getElementById("login-error").textContent = "Incorrect password.";
+        startRealtimeSync();
+      } catch (syncError) {
+        errorEl.textContent = "Signed in, but cloud data could not load. Check Supabase setup and try again.";
+        console.error(syncError);
+        await supabaseClient.auth.signOut();
+        activeUser = null;
       }
     });
-
     document.getElementById("logout-button").addEventListener("click", logout);
     document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
 
@@ -2066,45 +2137,67 @@
       applyTheme();
     });
 
-    document.getElementById("setting-save-password").addEventListener("click", () => {
+    document.getElementById("setting-save-password").addEventListener("click", async () => {
       const newPwd = document.getElementById("setting-new-password").value;
-      if (newPwd.length < 4) {
-        toast("Password must be at least 4 characters.", "error");
-        return;
-      }
-      settings.password = newPwd;
-      saveSettings();
+      if (newPwd.length < 12) { toast("Use a password with at least 12 characters.", "error"); return; }
+      const { error } = await supabaseClient.auth.updateUser({ password: newPwd });
+      if (error) { toast("Password update failed: " + error.message, "error"); return; }
       document.getElementById("setting-new-password").value = "";
-      toast("Password updated");
+      toast("Account password updated");
     });
 
     document.getElementById("setting-master-reset").addEventListener("click", masterReset);
     document.getElementById("master-reset-button").addEventListener("click", masterReset);
 
-    function masterReset() {
-      const confirmed = confirm(
-        "Master reset will permanently delete ALL transactions, budgets, and settings from this browser. This cannot be undone. Continue?"
-      );
-      if (!confirmed) return;
-      localStorage.removeItem(STORAGE_KEYS.transactions);
-      localStorage.removeItem(STORAGE_KEYS.budgets);
-      localStorage.removeItem(STORAGE_KEYS.settings);
-      sessionStorage.removeItem(STORAGE_KEYS.session);
+    async function masterReset() {
+      const confirmed = confirm("This permanently deletes all your cloud transactions, budgets and preferences for this account. This cannot be undone. Continue?");
+      if (!confirmed || !activeUser) return;
+      const { error } = await supabaseClient.from("mymoney_data").delete().eq("user_id", activeUser.id);
+      if (error) { toast("Could not delete cloud data: " + error.message, "error"); return; }
+      for (const key of Object.values(STORAGE_KEYS)) localStorage.removeItem(key);
       Object.values(charts).forEach(c => c && c.destroy && c.destroy());
       Object.keys(charts).forEach(k => delete charts[k]);
-      // Reset in-memory settings
       settings.currency = "INR";
       settings.theme = "light";
-      settings.password = DEFAULT_PASSWORD;
+      applyTheme();
       if (txDialog.open) txDialog.close();
       if (budgetDialogEl.open) budgetDialogEl.close();
-      setLoggedIn(false);
-      toast("All data wiped");
+      toast("Cloud data deleted");
+      render();
     }
 
     /* ================== Init ================== */
     applyTheme();
-    setLoggedIn(sessionStorage.getItem(STORAGE_KEYS.session) === "yes");
+    setLoggedIn(false);
+    async function initializeAuth() {
+      if (!supabaseConfigured) {
+        document.getElementById("login-error").textContent = "Finish Supabase setup: add your project URL and anon public key in the HTML file.";
+        return;
+      }
+      const { data: { session }, error } = await supabaseClient.auth.getSession();
+      if (error || !session) return;
+      activeUser = session.user;
+      try {
+        await loadCloudDataAndSync();
+        applyTheme();
+        document.getElementById("setting-currency").value = settings.currency;
+        document.getElementById("setting-theme").value = settings.theme;
+        setLoggedIn(true);
+        startRealtimeSync();
+      } catch (e) {
+        console.error(e);
+        document.getElementById("login-error").textContent = "Could not load your cloud data. Check Supabase configuration.";
+        await supabaseClient.auth.signOut();
+        activeUser = null;
+      }
+    }
+    initializeAuth();
+    if (supabaseClient) supabaseClient.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_OUT") {
+        activeUser = null; cloudReady = false;
+        setLoggedIn(false);
+      }
+    });
 
     // Watch system theme changes if "system" selected
     if (window.matchMedia) {
